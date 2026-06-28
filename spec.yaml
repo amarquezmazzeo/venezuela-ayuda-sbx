@@ -1,24 +1,26 @@
 schemaVersion: "1"
 kind: mixin
-name: venezuela-ayuda-secure
-displayName: Venezuela Ayuda – Supply-Chain Hardened Dev Environment
+name: venezuela-ayuda-shell
+displayName: Venezuela Ayuda – Supply-Chain Hardened Shell Environment
 description: |
-  Mixin kit for mawmawmaw/venezuela-ayuda.
-  Hardens npm dependency installation against supply-chain attacks:
-  - Pins npm to the exact lockfile (ci mode, no resolution drift)
-  - Validates every package against a SHA-512 integrity manifest
-  - Enforces an allowlist of outbound domains (registry, Supabase, OpenAI, FR-API)
-  - Proxies all secret credentials — keys never enter the VM
-  - Drops an .npmrc that disables pre/post-install scripts by default
-  - Installs audit tooling (Socket.dev CLI) for post-install CVE + behavior scan
+  Mixin kit for mawmawmaw/venezuela-ayuda targeting `sbx run shell`.
+  The shell agent is a bare Bash login shell with no pre-installed agent
+  binary or Node.js — this kit bootstraps the full toolchain and hardens
+  npm dependency installation against supply-chain attacks.
 
-# ─── Credential sources (read from host environment, never from inside the VM) ──
+  Key differences from the claude-agent variant:
+  - No `memory:` block (shell has no aiFilename / CLAUDE.md)
+  - No background startup audit (you're in the shell; output prints inline)
+  - Bash profile drops a MOTD reminding you of security constraints
+  - `npm run dev` is not auto-started — you run it yourself interactively
+
+# ─── Credential sources ───────────────────────────────────────────────────────
 credentials:
   sources:
     supabase-secret:
       env:
         - SUPABASE_SECRET_KEY
-        - SUPABASE_SERVICE_ROLE_KEY   # legacy fallback
+        - SUPABASE_SERVICE_ROLE_KEY
       priority: env-first
 
     openai:
@@ -33,23 +35,24 @@ credentials:
 
     supabase-db:
       env:
-        - SUPABASE_DB_URL             # used by migration scripts / backup only
+        - SUPABASE_DB_URL
       priority: env-first
 
-# ─── Network allowlist (deny-by-default; only what this stack actually needs) ──
+# ─── Network allowlist ────────────────────────────────────────────────────────
 network:
   allowedDomains:
-    # npm registry – packages + metadata
+    # npm registry
     - "registry.npmjs.org"
     - "registry.npmjs.com"
 
-    # npm audit / Socket.dev supply-chain scanner
+    # npm audit + Socket.dev supply-chain scanner
     - "audit.npmjs.org"
     - "socket.dev"
     - "api.socket.dev"
 
-    # Next.js telemetry (sandboxed, disabled via env; kept for transparency)
-    # intentionally omitted – NEXT_TELEMETRY_DISABLED=1 below suppresses it
+    # NodeSource GPG key + repo (used during install command)
+    - "deb.nodesource.com"
+    - "keyserver.ubuntu.com"
 
     # Supabase project API
     - "*.supabase.co"
@@ -58,19 +61,17 @@ network:
     # OpenAI (optional classifier)
     - "api.openai.com"
 
-    # FR-API face-recognition service
+    # FR-API face-recognition
     - "fr-api.reportavnzla.com"
 
-    # MapTiler / OpenStreetMap (for NEXT_PUBLIC_MAP_STYLE_URL resolution at build)
+    # MapTiler tiles
     - "api.maptiler.com"
     - "tile.openstreetmap.org"
 
-    # GitHub (for git+ssh package refs if any appear in lock file; read-only)
+    # GitHub (git+ssh package refs in lockfile; read-only)
     - "github.com"
     - "raw.githubusercontent.com"
 
-  # Proxy injects credentials for these domains; the secret is substituted
-  # in-flight and never stored in the container.
   serviceDomains:
     "*.supabase.co": supabase-secret
     "*.supabase.com": supabase-secret
@@ -91,41 +92,22 @@ network:
 # ─── Environment variables ────────────────────────────────────────────────────
 environment:
   variables:
-    # ---- Supabase (public / safe-for-browser vars set here; secret via proxy) --
-    # NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY must be
-    # supplied by the developer. They are non-secret and safe to set in the host
-    # shell before running `sbx run`.
+    # Public / non-secret vars set directly
     NEXT_PUBLIC_SITE_URL: "https://venezuelaayuda.com"
-
-    # ---- OpenAI model default ------------------------------------------------
     OPENAI_MODEL: "gpt-4o-mini"
-
-    # ---- FR-API base URL (no key here — injected by proxy) -------------------
     FR_API_URL: "https://fr-api.reportavnzla.com:8443"
-
-    # ---- Disable Next.js telemetry (no outbound calls to vercel.com) ---------
     NEXT_TELEMETRY_DISABLED: "1"
-
-    # ---- npm supply-chain hardening ------------------------------------------
-    # Prevent npm from executing lifecycle hooks during install.
-    # Override per-package only when explicitly audited.
-    NPM_CONFIG_IGNORE_SCRIPTS: "true"
-
-    # Force ci-mode semantics (lockfile must match; no resolution)
-    NPM_CONFIG_PREFER_FROZEN_LOCKFILE: "true"
-
-    # Audit level: fail on moderate or higher
-    NPM_CONFIG_AUDIT_LEVEL: "moderate"
-
-    # Disable automatic package-lock mutations
-    NPM_CONFIG_PACKAGE_LOCK: "true"
-
-    # ---- Sandbox marker (detectable at runtime) ------------------------------
     IS_SANDBOX: "1"
 
-  # These names are populated by the credential proxy at request time.
-  # The container process sees them as env vars but the value comes from the
-  # proxy substitution, NOT from the host shell being leaked in.
+    # npm supply-chain hardening (env layer; .npmrc is the file layer)
+    NPM_CONFIG_IGNORE_SCRIPTS: "true"
+    NPM_CONFIG_PREFER_FROZEN_LOCKFILE: "true"
+    NPM_CONFIG_AUDIT_LEVEL: "moderate"
+    NPM_CONFIG_PACKAGE_LOCK: "true"
+    NPM_CONFIG_FUND: "false"
+    NPM_CONFIG_UPDATE_NOTIFIER: "false"
+
+  # Proxy-managed — value is injected in-flight; container never sees the secret
   proxyManaged:
     - SUPABASE_SECRET_KEY
     - SUPABASE_SERVICE_ROLE_KEY
@@ -136,12 +118,12 @@ environment:
 # ─── Commands ─────────────────────────────────────────────────────────────────
 commands:
   install:
-    # 1. Bring Node toolchain up to date
-    - command: "apt-get update -qq && apt-get install -y --no-install-recommends ca-certificates curl gnupg"
+    # 1. System prerequisites
+    - command: "apt-get update -qq && apt-get install -y --no-install-recommends ca-certificates curl gnupg git"
       user: "0"
       description: "Install system prerequisites"
 
-    # 2. Install Node 22 LTS via NodeSource (deterministic pin)
+    # 2. Node.js 22 LTS from signed NodeSource repo
     - command: |
         NODE_MAJOR=22
         curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
@@ -149,48 +131,43 @@ commands:
         echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
           > /etc/apt/sources.list.d/nodesource.list
         apt-get update -qq && apt-get install -y nodejs
+        node --version && npm --version
       user: "0"
-      description: "Install Node.js 22 LTS from NodeSource (signed)"
+      description: "Install Node.js 22 LTS (NodeSource, signed)"
 
-    # 3. Install Socket.dev CLI for supply-chain scanning (no scripts during this install)
+    # 3. Socket.dev supply-chain scanner — installed globally, no scripts
     - command: "npm install --global --ignore-scripts socket@latest"
       user: "0"
       description: "Install Socket.dev supply-chain scanner"
 
-    # 4. Install the project dependencies using the frozen lockfile.
-    #    --ignore-scripts prevents pre/post-install hook execution during install.
-    #    A separate, explicit audit step runs afterward.
+    # 4. Frozen lockfile install — no lifecycle hooks
     - command: |
         cd ${WORKDIR:-/home/agent/workspace} && \
         npm ci --ignore-scripts --audit=false
       user: "1000"
-      description: "Install npm dependencies (lockfile-frozen, no scripts)"
+      description: "Install project dependencies (lockfile-frozen, no scripts)"
 
-    # 5. Run npm audit to surface known CVEs in the installed tree.
-    #    Exit code 1 on moderate+; the sandbox creation will fail visibly.
+    # 5. npm audit — fail on moderate+ CVEs
     - command: |
         cd ${WORKDIR:-/home/agent/workspace} && \
         npm audit --audit-level=moderate
       user: "1000"
-      description: "Audit npm dependency tree for known vulnerabilities"
+      description: "Audit npm tree — fail on moderate+ CVEs"
 
-    # 6. Run Socket CLI supply-chain scan (behavior analysis, typosquatting, etc.)
-    #    Non-blocking in sandbox creation (|| true) but results are printed so the
-    #    developer sees them. Adjust to exit-code-fail as your policy tightens.
+    # 6. Socket supply-chain scan — non-blocking but visible
     - command: |
         cd ${WORKDIR:-/home/agent/workspace} && \
         socket scan create --strict . || true
       user: "1000"
-      description: "Socket.dev supply-chain scan (typosquat, malware, install-scripts)"
+      description: "Socket.dev behavioral scan (typosquat, malware, install-scripts)"
 
   initFiles:
-    # Write .env.local from the env vars injected by the proxy.
-    # onlyIfMissing=true so a developer's existing .env.local is preserved.
+    # .env.local written from proxy-injected values; mode 0600; won't overwrite
     - path: /home/agent/workspace/.env.local
       onlyIfMissing: true
       mode: "0600"
       content: |
-        # Generated by venezuela-ayuda-secure sbx kit – DO NOT COMMIT
+        # Generated by venezuela-ayuda-shell sbx kit — DO NOT COMMIT
         # Public vars (safe for browser)
         NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
         NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=${NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY}
@@ -205,52 +182,53 @@ commands:
         FR_API_KEY=${FR_API_KEY}
         SUPABASE_DB_URL=${SUPABASE_DB_URL}
 
-        # Sandbox / telemetry flags
+        # Flags
         NEXT_TELEMETRY_DISABLED=${NEXT_TELEMETRY_DISABLED}
         IS_SANDBOX=${IS_SANDBOX}
 
+    # Bash profile MOTD — printed when you attach to the shell
+    - path: /home/agent/.config/venezuela-ayuda-motd.sh
+      mode: "0755"
+      content: |
+        #!/usr/bin/env bash
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════╗"
+        echo "║  venezuela-ayuda-shell  ·  supply-chain hardened env    ║"
+        echo "╠══════════════════════════════════════════════════════════╣"
+        echo "║  npm audit log  →  /tmp/npm-audit.log                   ║"
+        echo "║  .env.local     →  auto-generated (0600, proxy-managed) ║"
+        echo "╠══════════════════════════════════════════════════════════╣"
+        echo "║  RULES: always use --ignore-scripts when adding pkgs    ║"
+        echo "║         run: npm audit && socket scan create .           ║"
+        echo "║         never commit secrets or .env.local               ║"
+        echo "╚══════════════════════════════════════════════════════════╝"
+        echo ""
+        if [ -f /tmp/npm-audit.log ]; then
+          VULN_COUNT=$(grep -c '"severity"' /tmp/npm-audit.log 2>/dev/null || echo "0")
+          if [ "$VULN_COUNT" -gt 0 ]; then
+            echo "  ⚠  npm audit found issues — run: cat /tmp/npm-audit.log"
+            echo ""
+          fi
+        fi
+
+    # Append MOTD call to bash profile so it shows on login
+    - path: /home/agent/.bash_profile
+      onlyIfMissing: false
+      content: |
+        # venezuela-ayuda-shell kit
+        export PATH="$HOME/.local/bin:$PATH"
+        [ -f ~/.bashrc ] && source ~/.bashrc
+        bash /home/agent/.config/venezuela-ayuda-motd.sh
+
   startup:
-    # Re-run audit on every sandbox start to catch newly published advisories
-    # against the already-installed tree.
-    - command: ["sh", "-c", "cd ${WORKDIR:-/home/agent/workspace} && npm audit --audit-level=moderate 2>&1 | tee /tmp/npm-audit.log || echo '[WARN] npm audit found issues – see /tmp/npm-audit.log'"]
+    # Re-run audit on every sandbox start; foreground-safe since shell hasn't
+    # connected yet — output goes to /tmp/npm-audit.log for MOTD to reference.
+    - command:
+        - "sh"
+        - "-c"
+        - |
+          cd ${WORKDIR:-/home/agent/workspace} && \
+          npm audit --audit-level=moderate > /tmp/npm-audit.log 2>&1 || true
       user: "1000"
       background: true
-      description: "Re-run npm audit on startup (advisory refresh)"
-
-# ─── Agent memory / CLAUDE.md instructions ───────────────────────────────────
-memory: |
-  ## Supply-Chain Security Constraints (venezuela-ayuda-secure kit)
-
-  This sandbox enforces supply-chain hardening for the venezuela-ayuda project.
-  Follow these rules when working with npm dependencies:
-
-  ### Adding or updating packages
-  - ALWAYS use `npm install --ignore-scripts <pkg>` — never `npm install <pkg>`
-    without the flag. Lifecycle hooks (preinstall, postinstall, install) are the
-    primary attack vector for malicious packages.
-  - After adding a dependency, run `npm audit` and `socket scan create .` before
-    committing. Both must pass clean.
-  - Pin major versions in package.json (e.g. `"next": "16.x"`) to reduce resolution
-    drift. Avoid `*` or `latest` as version specifiers.
-  - NEVER commit package-lock.json changes without reviewing the diff for unexpected
-    transitive additions.
-
-  ### Environment / secrets
-  - `.env.local` is generated by the kit. Do NOT manually add secrets there.
-  - SUPABASE_SECRET_KEY, OPENAI_API_KEY, FR_API_KEY, and SUPABASE_DB_URL are
-    proxy-managed. Reference them via environment variables only; never hardcode.
-  - NEXT_PUBLIC_* vars are safe for the browser but still must not contain secrets.
-
-  ### Network
-  - Only the domains listed in the kit's allowedDomains may be reached. Any new
-    external service must be added to the kit spec and reviewed.
-  - The FR-API (fr-api.reportavnzla.com:8443) handles face-recognition.
-    All calls are server-side; the key is injected by the proxy.
-
-  ### Running the app
-  ```
-  npm run dev     # dev server at http://localhost:3000
-  npm run build   # production build (validates types + routes)
-  npm run lint    # ESLint
-  npm test        # node --test scripts/*.test.mjs
-  ```
+      description: "Refresh npm audit log on startup"
