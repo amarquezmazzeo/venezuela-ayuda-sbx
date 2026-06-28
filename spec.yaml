@@ -155,12 +155,6 @@ commands:
       user: "1000"
       description: "Socket.dev behavioral scan (typosquat, malware, install-scripts)"
 
-  initFiles:
-    # initFiles only supports ${WORKDIR} substitution — no other ${VAR} allowed.
-    # .env.local is written by the startup command below using envsubst instead.
-    - path: ${WORKDIR}/.gitkeep-kit-marker
-      content: ""
-
   startup:
     # Write .env.local on first start (onlyIfMissing semantics via shell guard).
     # Uses envsubst because initFiles doesn't support arbitrary ${VAR} expansion.
